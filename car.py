@@ -6,11 +6,11 @@ np = numpy
 
 ### CAR ###
 class Car:
-	def __init__(self, x, y, theta, x1, y1, x2, y2, x3, y3, x4, y4):
+	def __init__(self, x, y, th, x1, y1, x2, y2, x3, y3, x4, y4):
 		#car corners, CAR frame
 		self.x = x
 		self.y = y 
-		self.theta = theta 
+		self.th = th 
 		self.x1 = x1
 		self.y1 = y1
 		self.x2 = x2
@@ -21,13 +21,13 @@ class Car:
 		self.y4 = y4
 		self.l = 1
 
-	def set_car(self, x_new, y_new, theta_new):
+	def set_car(self, x_new, y_new, th_new):
 		"""
 		Moves the car to a specified state
 		"""
 		self.x = x_new
 		self.y = y_new
-		self.theta = theta_new
+		self.th = th_new
 
 	def CAR_to_WORLD(self):
 		"""
@@ -53,7 +53,7 @@ class Car:
 		"""
 		Rotation matrix
 		"""
-		th = self.theta
+		th = self.th
 		R_C_W = np.matrix([[math.cos(th), -math.sin(th)],
 			 		       [math.sin(th), math.cos(th)]])
 		return R_C_W
@@ -63,6 +63,6 @@ class Car:
 		Plots the car at its current position
 		"""
 		p_WORLD = self.CAR_to_WORLD()
-		plt.scatter([p_WORLD[0], p_WORLD[2], p_WORLD[4], p_WORLD[6]], [p_WORLD[1], p_WORLD[3], p_WORLD[5], p_WORLD[7]], c='b') #corners
-		plt.plot([p_WORLD[0], p_WORLD[2], p_WORLD[6], p_WORLD[4], p_WORLD[0]], [p_WORLD[1], p_WORLD[3], p_WORLD[7], p_WORLD[5], p_WORLD[1]], '') #rectangle
-		plt.scatter(self.x, self.y, c='r') #center
+		plt.scatter([p_WORLD[0], p_WORLD[2], p_WORLD[4], p_WORLD[6]], [p_WORLD[1], p_WORLD[3], p_WORLD[5], p_WORLD[7]], c='g') #corners
+		plt.plot([p_WORLD[0], p_WORLD[2], p_WORLD[6], p_WORLD[4], p_WORLD[0]], [p_WORLD[1], p_WORLD[3], p_WORLD[7], p_WORLD[5], p_WORLD[1]], c='g') #rectangle
+		plt.scatter(self.x, self.y, c='g') #center

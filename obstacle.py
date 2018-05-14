@@ -49,6 +49,16 @@ class Obstacle:
 		# }
 		return True
 
+	def contains_point(self, x, y):
+		"""
+		Determines if the x,y point is contained within the obstacle
+		"""
+		if ( x < self.x_max and x > self.x_min and
+			 y < self.y_max and y > self.y_min ):
+			return True
+		else:
+			return False
+
 	def calc_sign_d(xa, xb, xc, ya, yb, yc):
 		"""
 		Finds whether the point (xc, yc) is above or below the line formed by (xa, ya)

@@ -1,0 +1,59 @@
+This is BibTeX, Version 0.99d (TeX Live 2015/Debian)
+Capacity: max_strings=35307, hash_size=35307, hash_prime=30011
+The top-level auxiliary file: final_report.aux
+The style file: IEEEtran.bst
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated wiz_functions (elt_size=4) to 6000 items from 3000.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Database file #1: cite.bib
+-- IEEEtran.bst version 1.14 (2015/08/26) by Michael Shell.
+-- http://www.michaelshell.org/tex/ieeetran/bibtex/
+-- See the "IEEEtran_bst_HOWTO.pdf" manual for usage information.
+Warning--empty journal in LaValle1
+Warning--empty journal in Hall2018
+
+Done.
+You've used 3 entries,
+            4087 wiz_defined-function locations,
+            841 strings with 7542 characters,
+and the built_in function-call counts, 1872 in all, are:
+= -- 143
+> -- 27
+< -- 17
++ -- 17
+- -- 3
+* -- 92
+:= -- 305
+add.period$ -- 6
+call.type$ -- 3
+change.case$ -- 3
+chr.to.int$ -- 45
+cite$ -- 5
+duplicate$ -- 127
+empty$ -- 142
+format.name$ -- 3
+if$ -- 407
+int.to.chr$ -- 0
+int.to.str$ -- 3
+missing$ -- 19
+newline$ -- 34
+num.names$ -- 3
+pop$ -- 52
+preamble$ -- 1
+purify$ -- 0
+quote$ -- 2
+skip$ -- 135
+stack$ -- 0
+substring$ -- 107
+swap$ -- 96
+text.length$ -- 2
+text.prefix$ -- 0
+top$ -- 5
+type$ -- 3
+warning$ -- 2
+while$ -- 11
+width$ -- 4
+write$ -- 48
+(There were 2 warnings)

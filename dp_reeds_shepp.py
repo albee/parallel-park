@@ -9,6 +9,7 @@ from time import sleep
 import copy
 import bisect
 from collections import Counter
+from scipy.interpolate import RegularGridInterpolator
 np = numpy
 from car import *
 from obstacle import *
@@ -18,41 +19,45 @@ class Mesh:
 	"""
 	A dynamic programming mesh, configured to solve parallel parking
 	"""
-	def __init__(self, car, obstacles, x_size, y_size, theta_size, phi_size, x_max, y_max, phi_max, X0, K_max):
+	def __init__(self, car, obstacles, x_len, y_len, th_len, phi_len, x_max, y_max, phi_max, X0, K_max):
 		"""
 		Creates a state space grid and initializes X, U
 		""" 
 		self.obstacles = obstacles
 		self.car = car
+		self.goal_car = copy.deepcopy(car)
 
 		self.K_max = K_max
 		self.X0 = X0 #goal state (J* = 0), specified as mesh coordinates
-		self.X_size = np.matrix([[x_size], [y_size], [theta_size]])
-		self.phi_size = phi_size
-		self.phi_max = phi_max
 
+		# length of discretized state
+		self.x_len = x_len
+		self.y_len = y_len
+		self.th_len = th_len
 		# discretized state: [x; y; theta]
-		self.x_disc = np.linspace(0, x_max, num=x_size)
-		self.y_disc = np.linspace(0, y_max, num=y_size)
-		self.theta_disc = np.linspace(0, 2*math.pi - 2*math.pi/theta_size,  num=theta_size)
-		# print(self.x_disc)
-		# print(self.y_disc)
-		# print(self.theta_disc)
+		self.x_disc = np.linspace(0, x_max, num=x_len)
+		self.y_disc = np.linspace(0, y_max, num=y_len)
+		self.th_disc = np.linspace(0, 2*math.pi - 2*math.pi/th_len,  num=th_len)
 
+		# length of discretized input
+		self.phi_len = phi_len
+		self.phi_max = phi_max
 		# discretized input: [u; phi]
-		self.v_disc = np.array([-float(x_max)/(x_size-1), float(x_max)/(x_size-1)]) #discretized to size of mesh spacing
-		self.phi_disc = np.linspace(-phi_max, phi_max, num=phi_size)
+		self.v_disc = np.array([-float(x_max)/(x_len-1), float(x_max)/(x_len-1)]) #discretized to size of mesh spacing, 2 values
+		self.phi_disc = np.linspace(-phi_max, phi_max, num=phi_len)
 
 		# adjust car value
 		self.car.x = self.x_disc[self.X0[0,0]]
 		self.car.y = self.y_disc[self.X0[1,0]]
-		self.car.theta = self.theta_disc[self.X0[2,0]]
+		self.car.th = self.th_disc[self.X0[2,0]]
 
 		"""
 		mesh: (x_size X y_size X theta_size X 3)
 		Optimal cost-to-go, optimal control at each grid point. mesh has 3x1 opt = [J*;v*;phi*] stored at each point, mesh[#x,#y,#theta,:]
 		"""
 		self.mesh = self.init_mesh(0)
+		self.mark_grid_collision()
+		self.c_mesh = self.init_collision_mesh()
 
 	def init_mesh(self, X0_J):
 		"""
@@ -60,11 +65,54 @@ class Mesh:
 		Intially, each J* and U* is inf, except for the goal state, which is set to J*=0
 		XK_J = J* for goal state, h()
 		"""
-		X_size = self.X_size
-		opt = np.asmatrix(np.full(3,1))
-		mesh = np.full((X_size[0], X_size[1], X_size[2], 3), np.inf)
+		mesh = np.full((self.x_len, self.y_len, self.th_len, 4), 9999)
 		mesh[self.X0[0], self.X0[1], self.X0[2], 0] = X0_J # set cost-to-go for goal state
 		return mesh
+
+	def init_collision_mesh(self):
+		"""
+		Marks all collision-inducing inputs, as well as inputs that go out-of-bounds
+		"""
+		c_mesh = np.full((self.x_len, self.y_len, self.th_len, 2, self.phi_len), 0)
+		# Iterate of discretized state space
+		for m in range(self.x_len): # x iter
+			for n in range(self.y_len): # y iter
+				for p in range(self.th_len): # theta iter
+					if (m == self.X0[0] and n == self.X0[1] and p == self.X0[2]): # don't change cost if is goal state
+						break
+					# Iterate over discretized input
+					for q in range(2): # v iter
+						for r in range(self.phi_len): # phi iter
+							x_k1, y_k1, th_k1 = self.f(self.x_disc[m], self.y_disc[n], self.th_disc[p], self.v_disc[q], self.phi_disc[r])
+							if (x_k1 > self.x_disc[self.x_len-1] or x_k1 < 0 or
+								y_k1 > self.y_disc[self.y_len-1] or y_k1 < 0):
+								c_mesh[m,n,p,q,r] = 1 # mark as an invalid input
+							self.car.set_car(x_k1, y_k1, th_k1)
+							if self.collision_check():
+								c_mesh[m,n,p,q,r] = 1 # mark as an invalid input
+		print('Total input checks per mesh:')
+		print(c_mesh.size)
+		print('Out-of-bounds input checks:')
+		print(int(np.sum(c_mesh)))
+		return c_mesh
+
+	def mark_grid_collision(self):
+		"""
+		Deactivates grid points that have an obstacle collision
+		"""
+		for m in range(self.x_len): # x iter
+			for n in range(self.y_len): # y iter
+				for p in range(self.th_len): # th iter
+					self.mesh[m,n,p,3] = 0
+					for obstacle in self.obstacles:
+						if obstacle.contains_point(self.x_disc[m], self.y_disc[n]):
+						# Lies within an obstacle
+							self.mesh[m,n,p,3] = 1
+						else:
+						# Full collision check
+							self.car.set_car(self.x_disc[m], self.y_disc[n], self.th_disc[p])
+							if self.collision_check():
+								self.mesh[m,n,p,3] = 1
 
 	def collision_check(self):
 		"""
@@ -83,27 +131,31 @@ class Mesh:
 		# March forward for K_max iterations
 		for k in range(self.K_max):
 			print(k)
+			# Reinitialize the interpolater
+			RGI = RegularGridInterpolator(points=[self.x_disc, self.y_disc, self.th_disc], values=self.mesh[:,:,:,0],  bounds_error=True)
 			# Iterate over the grid
-			for m in range(self.X_size[0,0]): # x iter
-				for n in range(self.X_size[1,0]): # y iter
-					for p in range(self.X_size[2,0]): # theta iter
+			for m in range(self.x_len): # x iter
+				for n in range(self.y_len): # y iter
+					for p in range(self.th_len): # theta iter
 						cost_min = np.inf
 						if (m == self.X0[0] and n == self.X0[1] and p == self.X0[2]): # don't change cost if is goal state
-							cost_min = 0
+							break
+						if (self.mesh[m,n,p,3] == 1): # don't change cost if an obstacle point
+							break
 						cost_qr = np.inf
 						v_min = np.inf
 						phi_min = np.inf
-
 						# Iterate over discretized input
 						for q in range(2): # v iter
-							for r in range(self.phi_size): # phi iter
+							for r in range(self.phi_len): # phi iter
+								if (self.c_mesh[m,n,p,q,r] == 1): # skip if input causes collision
+									continue
 								# Find where this control takes you at k+1
-								x_k1, y_k1, theta_k1 = self.f(self.x_disc[m], self.y_disc[n], self.theta_disc[p], self.v_disc[q], self.phi_disc[r])
+								x_k1, y_k1, th_k1 = self.f(self.x_disc[m], self.y_disc[n], self.th_disc[p], self.v_disc[q], self.phi_disc[r])
 							
 								# Interpolate the cost-to-go at where you end up and find the total cost-to-go for J_k+1
-								cost_qr = self.find_J_k1(self.x_disc[m], self.y_disc[n], self.theta_disc[p], x_k1, y_k1, theta_k1)
-								# if (m==5 and n ==5 and p == 2):
-								# 	print(cost_qr)
+								cost_qr = self.find_J_k1(m, n, p, x_k1, y_k1, th_k1, RGI, k, self.v_disc[q])
+
 								# If lower than other input cost, set new J*_k+1 for the grid point
 								if cost_qr < cost_min:
 									cost_min = cost_qr
@@ -114,204 +166,426 @@ class Mesh:
 							self.mesh[m,n,p,1] = v_min
 							self.mesh[m,n,p,2] = phi_min
 
-	def f(self, x, y, theta, v, phi):
+	def f(self, x, y, th, v, phi):
 		"""
 		State dynamics, finds state k+1 given x_k and u_k
 		"""
-		x_k1 = x + v*math.cos(theta)
-		y_k1 = y + v*math.sin(theta)
-		theta_k1 = (theta + v/(self.car.l) * math.tan(phi)) % (math.pi*2) # note: car length set to 1 for convenience
+		x_k1 = x + v*math.cos(th)
+		y_k1 = y + v*math.sin(th)
+		th_k1 = (th + v/(self.car.l) * math.tan(phi)) % (math.pi*2) # note: car length set to 1 for convenience
 
-		return x_k1, y_k1, theta_k1
+		return x_k1, y_k1, th_k1
 
-	def find_J_k1(self, x_k, y_k, theta_k, x_k1, y_k1, theta_k1):
+	def find_J_k1(self, x_ind_k, y_ind_k, th_ind_k, x_k1, y_k1, th_k1, RGI, k, v_k):
 		"""
 		Calculate the new J* from a chosen iteration
 		"""
-		# Cost at endpoint (interpolated if not a grid point)
-		J_k1, v_flip = self.interp_J_k(x_k, y_k, theta_k, x_k1, y_k1, theta_k1)
-		if (J_k1 == np.inf): # stop if not a valid end condition
-			return J_k1
+		x_k = self.x_disc[x_ind_k]
+		y_k = self.y_disc[y_ind_k]
+		th_k = self.th_disc[th_ind_k]
 
+		# Cost at endpoint (interpolated if not a grid point), also includes penalty for direction change
+		J_k1 = self.interp_J_k(x_ind_k, y_ind_k, th_ind_k, x_k1, y_k1, th_k1, RGI, k, v_k)
+		if (J_k1 == 9999): # stop if not a valid end condition
+			return J_k1	
+	
 		# Cost of movement
-		C_k = self.cost_to_move(x_k, y_k, theta_k, x_k1, y_k1, theta_k1, v_flip)
+		C_k = self.cost_to_move(x_k, y_k, th_k, x_k1, y_k1, th_k1)
 		J_k1 = J_k1+C_k
 
 		return J_k1
 
-	def interp_J_k(self, x_k, y_k, theta_k, x_k1, y_k1, theta_k1):
+	def interp_J_k(self, x_ind_k, y_ind_k, th_ind_k, x_k1, y_k1, th_k1, RGI, k, v_k):
 		"""
-		Interpolate J_k from grid points near where the control iteration ended
+		Interpolate J_k from grid points near where the control iteration ended.
+		Tests increase in order of expense.
 		"""
-		th_s = self.X_size[2,0]
-		v_flip = False
-		J_k1 = np.inf
-		idx, idy, idth = self.get_neighbors(x_k1, y_k1, theta_k1)
-		J = self.filter_edge_cases(idx, idy, idth, 0) #get valid neighbors for cost-to-go
+		x_k = self.x_disc[x_ind_k]
+		y_k = self.y_disc[y_ind_k]
+		th_k = self.th_disc[th_ind_k]
 
-		# If out of bounds, neglect
-		# if (idx >= self.X_size[0,0] or idx == 0 or
-		# 	idy >= self.X_size[1,0] or idy == 0):
-		# 	return J_k1, v_flip
+		J_k1 = 0 
+	
+		idx, idy, idth = self.get_neighbors(x_k1, y_k1, th_k1) # get valid neighbors for cost-to-go
+		J_cube = self.filter_edge_cases(idx, idy, idth, 0) # modify the J values
 
-		# If colliding, neglect
-		# TODO
+		# Catch case of all equal values (e.g. all 9999)
+		if (J_cube[1:] == J_cube[:-1]):
+			J_k1 = J_cube[0]
+			return J_k1
 
-		# Otherwise, interpolate grid values
-		# Averaging interpolation (inaccurate)
-		# J000 = self.mesh[idx-1, idy-1, (idth-1)%th_s, 0]
-		# J001 = self.mesh[idx-1, idy-1, (idth)%th_s, 0]
-		# J010 = self.mesh[idx-1, idy, (idth-1)%th_s, 0]
-		# J011 = self.mesh[idx-1, idy, (idth)%th_s, 0]
-		# J100 = self.mesh[idx, idy-1, (idth-1)%th_s, 0]
-		# J101 = self.mesh[idx, idy-1, (idth)%th_s, 0]
-		# J110 = self.mesh[idx, idy, (idth-1)%th_s, 0]
-		# J111 = self.mesh[idx, idy, (idth)%th_s, 0]
+		#add on if sign change	
+		# print(self.mesh[:,:,:,1])
+		# print('debug')
+		# print(x_k1, y_k1, th_k1)
+		# print(idx, idy, idth)
+		# print(self.tri_interp_control(x_k1, y_k1, th_k1, idx, idy, idth, 1))
+		# print(np.sign(self.tri_interp_control(x_k1, y_k1, th_k1, idx, idy, idth, 1)))
+		# print(v_k)
+		# v_sign = np.sign(self.tri_interp_control(x_k1, y_k1, th_k1, idx, idy, idth, 1))
+		# if (v_sign != np.sign(v_k)):
+		# 	J_k1 += (self.x_disc[1] - self.x_disc[0])*50 # add on equivalent of fifty grid travel
 
-		# J = [J000, J001, J010, J011, J100, J101, J110, J111]
+		# Go to neareast after a few iterations
+		# if (k > 0):
+		# 	J_cube2 = [i for i in J_cube if i < 500]
+		# 	if len(J_cube2) > 2:
+		# 		J_k1 = self.get_nearest_J(x_k1, y_k1, th_k1, idx, idy, idth)
+		# 		return J_k1
 
-		J2 = [i for i in J if i != np.inf]
-		if (len(J2) != 0):
-			J_k1 = np.mean(J2)
+		# If on a boundary, use the filter approximation
+		if (idx >= self.x_len or idx == 0 or
+			idy >= self.y_len or idy == 0):
+			J_k1 += np.mean(J_cube)
+			return J_k1
 
-		# If v flipped sign, take note
-		if (v_flip):
-			v_flip = True
+		# Trilinear, but initialize everything to a high value
+		else:
+			# print('tri')
+			# print(idx, idy, idth)
+			# print(x_k1, y_k1, th_k1)
+			# print('tri dims')
+			# print(low_th, high_th)
+			# print(self.mesh[idx-1:idx+1,idy-1:idy+1,idth-1:idth+1,0].shape)
+			J_k1 += self.tri_interp(x_k1, y_k1, th_k1, idx, idy, idth, 0)
+		return J_k1
 
-		return J_k1, v_flip
+	def get_nearest_J(self, x_k1, y_k1, th_k1, idx, idy, idth):
+		"""
+		Return the Euclidean nearest grid point
+		"""
+		th_s = self.th_len
+		if ((idx == 0) and (idy == 0)): # bottom left
+			idx+=1
+			idy+=1
+		elif (idx >= self.x_len and (idy == 0)): # bottom right
+			idx+=-1
+			idy+=1
+		elif (idy >= self.y_len and (idx == 0)): # top left
+			idx+=1
+			idy+=-1
+		elif (idx >= self.x_len and idy >= self.y_len): # top right
+			idx+=-1
+			idy+=-1
+		elif (idx == 0): # left
+			idx+=1
+		elif (idy == 0): # bottom
+			idy+=1
+		elif (idx >= self.x_len): # right
+			idx+=-1
+		elif (idy >= self.y_len): # top
+			idy+=-1
 
-	def interp_u(self, x_k1, y_k1, theta_k1):
+		low_p = idx
+		low_q = idy
+		low_r = idth
+		low_dist = 9999
+		for p in range(idx-1, idx+1):
+			for q in range(idy-1, idy+1):
+				for r in range(idth-1, idth+1):
+					cur_dist = linalg.norm( np.array((x_k1, y_k1, th_k1%(2*math.pi))) - np.array((self.x_disc[p], self.y_disc[q], self.th_disc[r]%(2*math.pi))) )
+					if (cur_dist < low_dist and self.mesh[p,q,r,0] < 40):
+						low_dist = cur_dist
+						low_p = p
+						low_q = q
+						low_r = r
+		J_near = self.mesh[low_p,low_q,low_r,0]
+		return J_near
+
+	def interp_v(self, x_k1, y_k1, th_k1, idx, idy, idth):
 		"""
 		Interpolate the optimal control at a non gridpoint
 		"""
-		idx, idy, idth = self.get_neighbors(x_k1, y_k1, theta_k1)
-		# if (idx >= self.X_size[0,0] or idx == 0 or
-		# 	idy >= self.X_size[1,0] or idy == 0):
 		
 		# v control
-		v = self.filter_edge_cases(idx, idy, idth, 1) #get valid neighbors for control v
-		c = Counter(v)
-		most = c.most_common()[0][0] # select most common velocity
-		v_star = most
+		# v = self.filter_edge_cases(idx, idy, idth, 1) # get valid neighbors for control v
+		# v = [x for x in v if x != 9999] # get rid of unitialized values
+		# c = Counter(v)
+		# try:
+		# 	most = c.most_common()[0][0] # select most common velocity
+		# except:
+		# 	print('MAKING A SELECTION')
+		# 	most = self.v_disc[1]
+		# v_star = most
 
-		# phi control
-		p = self.filter_edge_cases(idx, idy, idth, 2) #get valid neighbors for control phi
-		p2 = [i for i in p if i != np.inf]
-		if (len(p2) != 0):
-			p_star = np.mean(p2)
-		return v_star, p_star
+		v_star = self.get_nearest_v(x_k1, y_k1, th_k1, idx, idy, idth)
 
-	def get_neighbors(self, x_k1, y_k1, theta_k1):
+		return v_star
+
+	def get_nearest_v(self, x_k1, y_k1, th_k1, idx, idy, idth):
+		"""
+		Return the Euclidean nearest grid point that is initialized
+		"""
+		th_s = self.th_len
+		if ((idx == 0) and (idy == 0)): # bottom left
+			idx+=1
+			idy+=1
+		elif (idx >= self.x_len and (idy == 0)): # bottom right
+			idx+=-1
+			idy+=1
+		elif (idy >= self.y_len and (idx == 0)): # top left
+			idx+=1
+			idy+=-1
+		elif (idx >= self.x_len and idy >= self.y_len): # top right
+			idx+=-1
+			idy+=-1
+		elif (idx == 0): # left
+			idx+=1
+		elif (idy == 0): # bottom
+			idy+=1
+		elif (idx >= self.x_len): # right
+			idx+=-1
+		elif (idy >= self.y_len): # top
+			idy+=-1
+
+		# # wrap around theta
+		# if (idth >= self.th_len): 
+		# 	low_id = self.th_disc[idth-1]
+		# 	high_th = low_th + (self.th_disc[1] - self.th_disc[0])
+		# elif (idth == 0):
+		# 	low_th = self.th_disc[0] - (self.th_disc[1] - self.th_disc[0])
+		# 	high_th = self.th_disc[idth] 
+		# else:
+		# 	low_th = self.th_disc[idth-1]
+		# 	high_th = self.th_disc[idth] 
+
+		low_p = idx
+		low_q = idy
+		low_r = idth%(self.th_len)
+		low_dist = 9999
+		for p in range(idx-1, idx+1):
+			for q in range(idy-1, idy+1):
+				for r in range(idth%(self.th_len)-1, idy%(self.th_len)+1):
+					cur_dist = linalg.norm( np.array((x_k1, y_k1, th_k1%(2*math.pi))) - np.array((self.x_disc[p], self.y_disc[q], self.th_disc[r]%(2*math.pi))) )
+					if (cur_dist < low_dist and self.mesh[p,q,r,1] != 9999):
+						low_dist = cur_dist
+						low_p = p
+						low_q = q
+						low_r = r
+
+		J_near = self.mesh[low_p,low_q,low_r,1]
+		print('near')
+		print(J_near)
+		return J_near
+
+	def tri_interp(self, x_k1, y_k1, th_k1, idx, idy, idth, value):
+		"""
+		Interpolate trilinearly if all 8 corners available
+		value: index of mesh stored valued to interpolate
+		0=cost-to-go
+		1=v
+		2=phi
+		"""
+		# wrap around theta
+		if (idth >= self.th_len): 
+			low_th = self.th_disc[idth-1]
+			high_th = low_th + (self.th_disc[1] - self.th_disc[0])
+		elif (idth == 0):
+			low_th = self.th_disc[0] - (self.th_disc[1] - self.th_disc[0])
+			high_th = self.th_disc[idth] 
+		else:
+			low_th = self.th_disc[idth-1]
+			high_th = self.th_disc[idth] 
+
+
+		if (idth >= self.th_len): # wrap around theta
+			values = np.array([self.mesh[idx-1:idx+1,idy-1:idy+1,idth-1,value], self.mesh[idx-1:idx+1,idy-1:idy+1,0,value]])
+		elif (idth == 0):
+			values = np.array([self.mesh[idx-1:idx+1,idy-1:idy+1,self.th_len-1,value], self.mesh[idx-1:idx+1,idy-1:idy+1,0,value]])
+		else:	
+			values=self.mesh[idx-1:idx+1,idy-1:idy+1,idth-1:idth+1,value]
+
+		RGI = RegularGridInterpolator(points=[self.x_disc[idx-1:idx+1], self.y_disc[idy-1:idy+1], [low_th, high_th]],\
+ 							          values=values)
+		output = RGI((x_k1, y_k1, th_k1))
+		return output
+
+	def tri_interp_control(self, x_k1, y_k1, th_k1, idx, idy, idth, value):
+		"""
+		Interpolate trilinearly if all 8 corners available
+		value: index of mesh stored valued to interpolate
+		0=cost-to-go
+		1=v
+		2=phi
+		"""
+		# wrap around theta
+		if (idth >= self.th_len): 
+			low_th = self.th_disc[idth-1]
+			high_th = low_th + (self.th_disc[1] - self.th_disc[0])
+		elif (idth == 0):
+			low_th = self.th_disc[0] - (self.th_disc[1] - self.th_disc[0])
+			high_th = self.th_disc[idth] 
+		else:
+			low_th = self.th_disc[idth-1]
+			high_th = self.th_disc[idth] 
+
+		if (idth >= self.th_len): # wrap around theta
+			values = np.array([self.mesh[idx-1:idx+1,idy-1:idy+1,idth-1,value], self.mesh[idx-1:idx+1,idy-1:idy+1,0,value]])
+		elif (idth == 0):
+			values = np.array([self.mesh[idx-1:idx+1,idy-1:idy+1,self.th_len-1,value], self.mesh[idx-1:idx+1,idy-1:idy+1,0,value]])
+		else:
+			values=self.mesh[idx-1:idx+1,idy-1:idy+1,idth-1:idth+1,value]
+
+		# get rid of any intruding initialized phi by averaging out the cell
+		bad_indices = []
+		good_vals = []
+		new_values = copy.copy(values) # copy
+		for index, val in np.ndenumerate(new_values):
+			if val == 9999: # unitialized
+				bad_indices.append(index)
+			else:
+				good_vals.append(val)
+		for index in bad_indices:
+			new_values[index] = np.mean(good_vals)
+
+		RGI = RegularGridInterpolator(points=[self.x_disc[idx-1:idx+1], self.y_disc[idy-1:idy+1], [low_th, high_th]],\
+ 							 		  values=new_values)
+		output = RGI((x_k1, y_k1, th_k1))
+		return output
+
+
+	def get_neighbors(self, x_k1, y_k1, th_k1):
 		"""
 		Get points in the 8-cube surrounding the X_k1 point
 		"""
 		idx = bisect.bisect(self.x_disc, x_k1) # this index and one below it are neighbors
 		idy = bisect.bisect(self.y_disc, y_k1)
-		idth = bisect.bisect(self.theta_disc, theta_k1)
+		idth = bisect.bisect(self.th_disc, th_k1)
+		if (x_k1 == self.x_disc[self.x_len-1]): # knock down if right on the edge
+			idx = idx-1
+		if (y_k1 == self.y_disc[self.y_len-1]):
+			idy = idy-1
 		return idx, idy, idth
+
+	def print_neighbors(self, x_k1, y_k1, th_k1):
+		"""
+		Print neighbor point indices
+		"""
+		print('x_k1, y_k1, th_k1')
+		print(x_k1, y_k1, th_k1)
+		idx, idy, idth = self.get_neighbors(x_k1, y_k1, th_k1)
+		idth = idth%self.th_len # wrap theta around
+		print('above neighbors')
+		print(idx, idy, idth)
+		print(self.x_disc[idx], self.y_disc[idy], self.th_disc[idth])
+		print('below neighbors')
+		print(idx-1, idy-1, idth-1)
+		print(self.x_disc[idx-1], self.y_disc[idy-1], self.th_disc[idth-1])
 
 	def filter_edge_cases(self, idx, idy, idth, var):
 		"""
-		Filters out edge cases and returns the valid nearest neighbors
+		Finds edge cases (out-of-bounds) and returns 8 nearest neighbors by adjusting into the mesh.
 		"""
-		# print(idx, idy, idth)
-		th_s = self.X_size[2,0]
+		th_s = self.th_len
 		if ((idx == 0) and (idy == 0)): # bottom left
-			v110 = self.mesh[idx, idy, (idth-1)%th_s, var]
-			v111 = self.mesh[idx, idy, (idth)%th_s, var]
-			v = [v110, v111]
-		elif (idx >= self.X_size[0,0] and (idy == 0)): # bottom right
-			v010 = self.mesh[idx-1, idy, (idth-1)%th_s, var]
-			v011 = self.mesh[idx-1, idy, (idth)%th_s, var]
-			v = [v010, v011]
-		elif (idy >= self.X_size[1,0] and (idx == 0)): # top left
-			v100 = self.mesh[idx, idy-1, (idth-1)%th_s, var]
-			v101 = self.mesh[idx, idy-1, (idth)%th_s, var]
-			v = [v100, v101]
-		elif (idx >= self.X_size[0,0] and idy >= self.X_size[1,0]): # top right
-			v000 = self.mesh[idx-1, idy-1, (idth-1)%th_s, var]
-			v001 = self.mesh[idx-1, idy-1, (idth)%th_s, var]
-			v = [v000, v001]
+			print(idx, idy, idth)
+			print('out')
+			idx+=1
+			idy+=1
+		elif (idx >= self.x_len and (idy == 0)): # bottom right
+			print(idx, idy, idth)
+			print('out')
+			idx+=-1
+			idy+=1
+		elif (idy >= self.y_len and (idx == 0)): # top left
+			print(idx, idy, idth)
+			print('out')
+			idx+=1
+			idy+=-1
+		elif (idx >= self.x_len and idy >= self.y_len): # top right
+			print(idx, idy, idth)
+			print('out')
+			idx+=-1
+			idy+=-1
 		elif (idx == 0): # left
-			v100 = self.mesh[idx, idy-1, (idth-1)%th_s, var]
-			v101 = self.mesh[idx, idy-1, (idth)%th_s, var]
-			v110 = self.mesh[idx, idy, (idth-1)%th_s, var]
-			v111 = self.mesh[idx, idy, (idth)%th_s, var]
-			v = [v100, v101, v110, v111]
+			print(idx, idy, idth)
+			print('out')
+			idx+=1
 		elif (idy == 0): # bottom
-			v010 = self.mesh[idx-1, idy, (idth-1)%th_s, var]
-			v011 = self.mesh[idx-1, idy, (idth)%th_s, var]
-			v110 = self.mesh[idx, idy, (idth-1)%th_s, var]
-			v111 = self.mesh[idx, idy, (idth)%th_s, var]
-			v = [v010, v011, v110, v111]
-		elif (idx >= self.X_size[0,0]): # right
-			v000 = self.mesh[idx-1, idy-1, (idth-1)%th_s, var]
-			v001 = self.mesh[idx-1, idy-1, (idth)%th_s, var]
-			v010 = self.mesh[idx-1, idy, (idth-1)%th_s, var]
-			v011 = self.mesh[idx-1, idy, (idth)%th_s, var]
-			v =[v000, v001, v010, v011]
-		elif (idy >= self.X_size[1,0]): # top
-			v000 = self.mesh[idx-1, idy-1, (idth-1)%th_s, var]
-			v001 = self.mesh[idx-1, idy-1, (idth)%th_s, var]
-			v101 = self.mesh[idx, idy-1, (idth)%th_s, var]
-			v100 = self.mesh[idx, idy-1, (idth-1)%th_s, var]
-			v = [v000, v001, v101, v100]
-		else: # normal interp
-			v000 = self.mesh[idx-1, idy-1, (idth-1)%th_s, var] # v_x_y_theta
-			v001 = self.mesh[idx-1, idy-1, (idth)%th_s, var]
-			v010 = self.mesh[idx-1, idy, (idth-1)%th_s, var]
-			v011 = self.mesh[idx-1, idy, (idth)%th_s, var]
-			v100 = self.mesh[idx, idy-1, (idth-1)%th_s, var]
-			v101 = self.mesh[idx, idy-1, (idth)%th_s, var]
-			v110 = self.mesh[idx, idy, (idth-1)%th_s, var]
-			v111 = self.mesh[idx, idy, (idth)%th_s, var]
-			v = [v000, v001, v010, v011, v100, v101, v110, v111]
+			print(idx, idy, idth)
+			print('out')
+			idy+=1
+		elif (idx >= self.x_len): # right
+			print(idx, idy, idth)
+			print('out')
+			idx+=-1
+		elif (idy >= self.y_len): # top
+			print(idx, idy, idth)
+			print('out')
+			idy+=-1
+		
+		# normal interp
+		v000 = self.mesh[idx-1, idy-1, (idth-1)%th_s, var] # v_x_y_th
+		v001 = self.mesh[idx-1, idy-1, (idth)%th_s, var]
+		v010 = self.mesh[idx-1, idy, (idth-1)%th_s, var]
+		v011 = self.mesh[idx-1, idy, (idth)%th_s, var]
+		v100 = self.mesh[idx, idy-1, (idth-1)%th_s, var]
+		v101 = self.mesh[idx, idy-1, (idth)%th_s, var]
+		v110 = self.mesh[idx, idy, (idth-1)%th_s, var]
+		v111 = self.mesh[idx, idy, (idth)%th_s, var]
+		v = [v000, v001, v010, v011, v100, v101, v110, v111]
 		return v
 
-	def cost_to_move(self, x_k, y_k, theta_k, x_k1, y_k1, theta_k1, v_flip):
+	def cost_to_move(self, x_k, y_k, th_k, x_k1, y_k1, th_k1):
 		"""
 		Calculate the additive cost of performing a control iteration
 		"""
-		dist = np.linalg.norm(np.array((x_k, y_k)) - np.array((x_k1, y_k1)))
-		if (v_flip): 
-			g_k1 = dist + 1 # change in velocity command
-		else:
-			g_k1 = dist
+		g_k1 = self.v_disc[1] #np.linalg.norm(np.array((x_k, y_k)) - np.array((x_k1, y_k1)))
 		return g_k1
 
-	def find_u_opt(self, x_start, y_start, theta_start):
+	def find_u_opt(self, x_start, y_start, th_start):
 		"""
 		Returns the optimal control and state trajectory based on the computed dp mesh
 		"""
-		iter = 0
-		v_star = self.mesh[x_start, y_start, theta_start, 1]
-		phi_star = self.mesh[x_start, y_start, theta_start, 1]
-		x_k = x_start
-		y_k = y_start
-		th_k = theta_start
+		num = 0
+		# Modified variables
+		v_star = self.mesh[x_start, y_start, th_start, 1]   # optimal velocity
+		phi_star = self.mesh[x_start, y_start, th_start, 2] # optimal steering angle
+		x_k = self.x_disc[x_start]							   # x at step k
+		y_k = self.y_disc[y_start]							   # y at step k
+		th_k = self.th_disc[th_start]					   # theta at step k
+
+		# Constants
+		X_SPACING = self.x_disc[1]-self.x_disc[0]
+		X_GOAL = self.x_disc[self.X0[0,0]]
+		Y_GOAL = self.y_disc[self.X0[1,0]]
+		TH_GOAL = self.th_disc[self.X0[2,0]]
 
 		# State history for plotting
 		x_k_hist = [x_k]
 		y_k_hist = [y_k]
 		th_k_hist = [th_k]
 
-		if (v_star == np.inf or phi_star == np.inf):
-			print('mesh error!')
-			return 'blargh'
+		print('x, y, th')
+		print(x_k, y_k, th_k)
+		print('control')
+		print(v_star, phi_star)
 
-		while (np.linalg.norm(np.array((x_k, y_k)) - np.array((self.x_disc[self.X0[0,0]]), self.y_disc[self.X0[1,0]])) > (self.x_disc[1]-self.x_disc[0])/2 ):
-			iter += 1
-			if (iter > 500):
+		# While more than a grid space from the goal, keep searching
+		while (np.linalg.norm( np.array((x_k, y_k, th_k%math.pi)) - np.array((X_GOAL, Y_GOAL, TH_GOAL)) ) > (X_SPACING)):
+			num += 1
+			if (num > 500):
 				break
+			if (v_star == np.inf or phi_star == np.inf):
+				print('mesh error!')
+				return 'blargh'
 			#move
 			x_k1, y_k1, th_k1 = self.f(x_k, y_k, th_k, v_star, phi_star)
 
 			#interpolate to get u*
-			v_star, phi_star = self.interp_u(x_k1, y_k1, th_k1)
+			print('x, y, th')
+			print(x_k1, y_k1, th_k1)
+			idx, idy, idth = self.get_neighbors(x_k1, y_k1, th_k1) #get valid neighbors for cost-to-go
+
+			v_star = (self.v_disc[1]) * np.sign(self.tri_interp_control(x_k1, y_k1, th_k1, idx, idy, idth, 1))
+			phi_star = self.tri_interp_control(x_k1, y_k1, th_k1, idx, idy, idth, 2)
+			print('control')
+			print(v_star, phi_star)
 
 			x_k = x_k1
 			y_k = y_k1
 			th_k = th_k1
+
 			x_k_hist.append(x_k)
 			y_k_hist.append(y_k)
 			th_k_hist.append(th_k)
@@ -325,13 +599,14 @@ class Mesh:
 			for y in self.y_disc:	
 				plt.scatter(x, y, c='black')
 
-	def plot_J(self):
+	def plot_3d_mesh(self, var):
 		"""
 		Plots the J for the mesh
 		"""
-		xid  = range(self.X_size[0,0])
-		yid  = range(self.X_size[1,0])
-		thid = range(self.X_size[2,0])
+		xid  = range(self.x_len)
+		yid  = range(self.y_len)
+		thid = range(self.th_len)
+		# thid = [0]
 		xpts = []
 		ypts = []
 		thpts = []
@@ -341,8 +616,8 @@ class Mesh:
 				for k in thid:
 					xpts.append(self.x_disc[i])
 					ypts.append(self.y_disc[j])
-					thpts.append(self.theta_disc[k])
-					Jpts.append(self.mesh[i,j,k,0])
+					thpts.append(self.th_disc[k])
+					Jpts.append(self.mesh[i,j,k,var])
 		ax2.scatter(xpts, ypts, thpts, zdir='z', c=Jpts, s=100)
 
 	def plot_goal_state(self):
@@ -350,10 +625,10 @@ class Mesh:
 		Plots the car state of the goal
 		"""
 		# adjust car value
-		plot_car = copy.deepcopy(self.car)
+		plot_car = copy.deepcopy(self.goal_car)
 		plot_car.x = self.x_disc[self.X0[0,0]]
 		plot_car.y = self.y_disc[self.X0[1,0]]
-		plot_car.theta = self.theta_disc[self.X0[2,0]]
+		plot_car.th = self.th_disc[self.X0[2,0]]
 		plot_car.plot_car()
 
 	#---Animate line trajectory of x, y------------------------------------------------
@@ -381,7 +656,7 @@ class Mesh:
 		car.set_car(x_k_hist[frame], y_k_hist[frame], th_k_hist[frame])
 
 		pts = car.CAR_to_WORLD() # x1, y1, x2, y2, x3, y3, x4, y4
-		print(pts)
+
 		x12data, y12data = [pts[0], pts[2]], [pts[1], pts[3]]
 		x13data, y13data = [pts[0], pts[4]], [pts[1], pts[5]]
 		x34data, y34data = [pts[4], pts[6]], [pts[5], pts[7]]
@@ -396,8 +671,8 @@ class Mesh:
 
 	def show_anim_car(self, fig, x_k_hist, y_k_hist, th_k_hist):
 		anim = animation.FuncAnimation(fig, self.update_anim_car, frames=len(x_k_hist),
-                              interval=250, blit=True, init_func=self.init_anim_car)
-		anim.save('anim1.mp4', fps=30, extra_args=['-vcodec', 'libx264'])
+                              interval=100, blit=True, init_func=self.init_anim_car)
+		anim.save('anim6.mp4', fps=5, extra_args=['-vcodec', 'libx264'])
 		plt.show()
 	#---Animate car parking of x, y, theta---------------------------------------------
 
@@ -408,10 +683,26 @@ def init_obstacles(scenario):
 	"""
 	obstacles = []
 	if (scenario == 0):
+		obst1 = Obstacle(-.1,1.4,-.1, .9) #xmin, xmax, ymin, ymax
+		obst2 = Obstacle(4.7,6.2,-.1, .9)
+		obstacles.append(obst1)
+		obstacles.append(obst2)
+
+	if (scenario == 1):
+		obst1 = Obstacle(0,1.2,0,1) #xmin, xmax, ymin, ymax
+		obst2 = Obstacle(3.8,5,0,1)
+		obstacles.append(obst1)
+		obstacles.append(obst2)
+
+	if (scenario == 2):
 		obst1 = Obstacle(0,5,0,2.5) #xmin, xmax, ymin, ymax
 		obst2 = Obstacle(10,15,0,2.5)
 		obstacles.append(obst1)
 		obstacles.append(obst2)
+
+	if (scenario == 3):
+		obst1 = Obstacle(1.9,3.1,1.9,3.1) #xmin, xmax, ymin, ymax
+		obstacles.append(obst1)
 	return obstacles
 
 def init_car(scenario):
@@ -422,13 +713,13 @@ def init_car(scenario):
 		# Car
 		x0 = 5
 		y0 = 5
-		theta0 = 0
+		th0 = 0
 		x1, y1 = -.2, .5
 		x2, y2 =  x1, -y1
 		x3, y3 = 1.2,  y1
 		x4, y4 =  x3,  -y1
 
-		car = Car(x0, y0, theta0, x1, y1, x2, y2, x3, y3, x4, y4)
+		car = Car(x0, y0, th0, x1, y1, x2, y2, x3, y3, x4, y4)
 	return car
 
 def init_mesh(scenario, car, obstacles):
@@ -436,55 +727,66 @@ def init_mesh(scenario, car, obstacles):
 	Creates a mesh instance
 	"""
 	if (scenario == 0):
-		x_size = 21
-		y_size = 21
-		theta_size = 15
-		phi_size = 8
-		phi_max = np.pi/3
-		x_max = 15
+		x_size = 12
+		y_size = 12
+		th_size = 12
+		phi_size = 7 # must be odd for straight line driving
+		phi_max = np.pi/4
+		x_max = 5
 		y_max = 5
-		K_max = 10 # max iterations
-		X0 = np.matrix([1,1,0]).T # value iteration goal state
+		K_max = 11
+		X0 = np.matrix([4,10,0]).T # goal state
 
 	if (scenario == 1):
-		x_size = 15
-		y_size = 5
-		theta_size = 8
-		phi_size = 8
-		phi_max = np.pi/3
-		x_max = 15
-		y_max = 5
-		K_max = 10 # max iterations
-		X0 = np.matrix([2,2,0]).T # value iteration goal state
-
-	if (scenario == 2):
-		x_size = 45
+		x_size = 35
 		y_size = 15
-		theta_size = 36
-		phi_size = 20
-		phi_max = np.pi/3
-		x_max = 15
-		y_max = 5
-		K_max = 10 # max iterations
-		X0 = np.matrix([4,4,9]).T # value iteration goal state
+		th_size = 60
+		phi_size = 19
+		phi_max = np.pi/4
+		x_max = 7
+		y_max = 3
+		K_max = 30
+		X0 = np.matrix([14,2,0]).T # goal state
 
-	mesh = Mesh(car, obstacles, x_size, y_size, theta_size, phi_size, x_max, y_max, phi_max, X0, K_max)
+	if (scenario == 2): #~1.5 hours
+		x_size = 30
+		y_size = 30
+		th_size = 30
+		phi_size = 15
+		phi_max = np.pi/4
+		x_max = 5
+		y_max = 5
+		K_max = 45
+		X0 = np.matrix([27,27,9]).T # goal state
+
+	if (scenario == 3):
+		x_size = 50
+		y_size = 25
+		th_size = 72
+		phi_size = 30
+		phi_max = np.pi/3
+		x_max = 10
+		y_max = 5
+		K_max = 30
+		X0 = np.matrix([2,10,2]).T # goal state
+
+	mesh = Mesh(car, obstacles, x_size, y_size, th_size, phi_size, x_max, y_max, phi_max, X0, K_max)
 	return mesh, x_max, y_max
 
 if __name__ == '__main__':
 	#Create a Reeds-Shepp instance
-
-
-	obstacles =          init_obstacles(0)
+	START_STATE =        (3,3,23)
+	obstacles =          init_obstacles(3)
 	car =                init_car(0)
-	mesh, x_max, y_max = init_mesh(1, car, obstacles)	
+	start_car = 		 init_car(0)
+	mesh, x_max, y_max = init_mesh(2, car, obstacles)	
 
 	#---------------------------------------------
 	# Init 2D Plot
 	fig, ax = plt.subplots()
 	ax.set_aspect(1)
-	ax.set_xlim([0,x_max])
-	ax.set_ylim([0,y_max])
+	ax.set_xlim([0-1,x_max+1])
+	ax.set_ylim([0-1,y_max+1])
 
 	line, = plt.plot([], [], lw=2, animated=True) # takes the one Line2D returned (empty)
 	xdata, ydata = [], []
@@ -501,11 +803,13 @@ if __name__ == '__main__':
 	x24data, y24data = [], []
 
 	# Update plots
-	car.plot_car()
-	# for obstacle in obstacles:
-	# 	obstacle.plot_obstacle(fig)
+	# start_car.set_car(mesh.x_disc[START_STATE[0]], mesh.y_disc[START_STATE[1]], mesh.th_disc[START_STATE[2]])
+	# start_car.plot_car()
+	for obstacle in obstacles:
+		obstacle.plot_obstacle(fig)
 	mesh.plot_mesh()
 	mesh.plot_goal_state()
+	# plt.show()
 	# plt.close()		
 
 	# Init 3D Plot
@@ -513,16 +817,16 @@ if __name__ == '__main__':
 	ax2.set_xlabel('x, m')
 	ax2.set_ylabel('y, m')
 	ax2.set_zlabel('theta, rad')
-	# Activate the first figure
-	plt.close()
-	#---------------------------------------------
 
+	# plt.close()
+	#---------------------------------------------
+	# Solve mesh using DP
 	mesh.dp()
-	mesh.plot_J()
-	# print(mesh.mesh[6,6,0,:])
+	mesh.plot_3d_mesh(0)
+	print(mesh.mesh[0,5,0,:])
+	# plt.show()
 
 	# Plot u_opt history
-	x_k_hist, y_k_hist, th_k_hist = mesh.find_u_opt(11,3,3)	
+	x_k_hist, y_k_hist, th_k_hist = mesh.find_u_opt(START_STATE[0], START_STATE[1], START_STATE[2])	
 	mesh.show_anim_car(fig, x_k_hist, y_k_hist, th_k_hist)
-
 	plt.show()
