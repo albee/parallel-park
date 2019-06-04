@@ -6,5 +6,4 @@ A few examples of the results:
 
 ![](/media/good_parallel.gif)
 ![](/media/leaving_the_spot.gif)
-![](/media/good_long_park.gif)
 ![](/media/backup.gif)
